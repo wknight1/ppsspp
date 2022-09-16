@@ -687,6 +687,21 @@ void SoftwareTransform::CalcCullParams(float &minZValue, float &maxZValue) {
 		std::swap(minZValue, maxZValue);
 }
 
+// Scale-invariant difference measurement.
+// Maybe there's something simpler..
+// Basically, will return 0.05 both for a = 1.0 and b = 1.05, and a = 1000.0 and b = 950.0, for example.
+static float diffFraction(float a, float b) {
+	if (b == 0.0f) {
+		if (a == 0.0f)
+			return 0.0f;
+	}
+	float ratio = a / b;
+	if (ratio > 1.0f)
+		return ratio - 1.0f;
+	else
+		return 1.0f - ratio;
+}
+
 void SoftwareTransform::ExpandRectangles(int vertexCount, int &maxIndex, u16 *&inds, TransformedVertex *transformed, TransformedVertex *transformedExpanded, int &numTrans, bool throughmode) {
 	// Rectangles always need 2 vertices, disregard the last one if there's an odd number.
 	vertexCount = vertexCount & ~1;
@@ -697,33 +712,45 @@ void SoftwareTransform::ExpandRectangles(int vertexCount, int &maxIndex, u16 *&i
 	u16 *newInds = inds + vertexCount;
 	u16 *indsOut = newInds;
 
+	// While transforming, check for merge-ability (draw consists of a set of vertical stripes forming a large rectangle).
+	bool canMerge = true;
+
 	maxIndex = 4 * (vertexCount / 2);
 	for (int i = 0; i < vertexCount; i += 2) {
-		const TransformedVertex &transVtxTL = transformed[indsIn[i + 0]];
-		const TransformedVertex &transVtxBR = transformed[indsIn[i + 1]];
+		const TransformedVertex &vtxTL = transformed[indsIn[i + 0]];
+		const TransformedVertex &vtxBR = transformed[indsIn[i + 1]];
+
+		if (i >= 2) {
+			const TransformedVertex &prevTL = transformed[indsIn[i - 2]];
+			const TransformedVertex &prevBR = transformed[indsIn[i - 1]];
+
+			if (prevBR.x != vtxTL.x || prevBR.u != vtxTL.u || prevTL.y != vtxTL.y || prevBR.y != vtxBR.y || prevBR.color0_32 != vtxBR.color0_32) {
+				canMerge = false;
+			}
+		}
 
 		// We have to turn the rectangle into two triangles, so 6 points.
 		// This is 4 verts + 6 indices.
 
 		// bottom right
-		trans[0] = transVtxBR;
+		trans[0] = vtxBR;
 
 		// top right
-		trans[1] = transVtxBR;
-		trans[1].y = transVtxTL.y;
-		trans[1].v = transVtxTL.v;
+		trans[1] = vtxBR;
+		trans[1].y = vtxTL.y;
+		trans[1].v = vtxTL.v;
 
 		// top left
-		trans[2] = transVtxBR;
-		trans[2].x = transVtxTL.x;
-		trans[2].y = transVtxTL.y;
-		trans[2].u = transVtxTL.u;
-		trans[2].v = transVtxTL.v;
+		trans[2] = vtxBR;
+		trans[2].x = vtxTL.x;
+		trans[2].y = vtxTL.y;
+		trans[2].u = vtxTL.u;
+		trans[2].v = vtxTL.v;
 
 		// bottom left
-		trans[3] = transVtxBR;
-		trans[3].x = transVtxTL.x;
-		trans[3].u = transVtxTL.u;
+		trans[3] = vtxBR;
+		trans[3].x = vtxTL.x;
+		trans[3].u = vtxTL.u;
 
 		// That's the four corners. Now process UV rotation.
 		if (throughmode) {
@@ -745,6 +772,43 @@ void SoftwareTransform::ExpandRectangles(int vertexCount, int &maxIndex, u16 *&i
 
 		numTrans += 6;
 	}
+
+	if (canMerge && vertexCount > 3) {
+		// Check that the rate of U/X advance is steady.
+		float prevRatio = 0.0f;
+		bool steadyRate = true;
+		for (int i = 0; i < vertexCount - 2; i += 2) {
+			const TransformedVertex &vtxTL = transformed[indsIn[i + 0]];
+			const TransformedVertex &vtxTLNext = transformed[indsIn[i + 2]];
+			float dx = vtxTLNext.x - vtxTL.x;
+			float du = vtxTLNext.u - vtxTL.u;
+			float ratio = du / dx;
+			if (prevRatio == 0.0f) {
+				prevRatio = ratio;
+			}
+
+			if (vertexCount == 0x1e) {
+				vertexCount += 0;
+			}
+
+			// If the relative difference is more than 0.1%, we reject this merge (arbitrary threshold).
+			float frac = diffFraction(ratio, prevRatio);
+			if (frac > 0.001f) {
+				steadyRate = false;
+				break;
+			}
+		}
+
+		if (steadyRate) {
+			// Rewrite indices to only point to the outer 4.
+			newInds[0] = (vertexCount - 2) * 2 + 0;
+			newInds[1] = (vertexCount - 2) * 2 + 1;
+			newInds[4] = (vertexCount - 2) * 2;
+
+			numTrans = 6;
+		}
+	}
+
 	inds = newInds;
 }
 
