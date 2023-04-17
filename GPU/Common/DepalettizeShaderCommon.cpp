@@ -78,7 +78,13 @@ void GenerateDepalShader300(ShaderWriter &writer, const DepalConfig &config) {
 	// An alternative would be to have a special mode where we keep some extra precision here and sample the CLUT linearly - works for ramps such
 	// as those that Test Drive uses for its color remapping. But would need game specific flagging.
 
-	writer.C("  vec4 color = ").SampleTexture2D("tex", "texcoord").C(";\n");
+	// TODO: Make generic.
+	if (config.bufferFormat == GE_FORMAT_5551 && config.textureFormat == GE_FORMAT_CLUT8) {
+		// The texcoord will already effectively be scaled.
+		writer.C("  vec4 color = ").SampleTexture2D("tex", "vec2(texcoord.x, texcoord.y)").C(";\n");
+	} else {
+		writer.C("  vec4 color = ").SampleTexture2D("tex", "texcoord").C(";\n");
+	}
 
 	int shiftedMask = mask << shift;
 	switch (config.bufferFormat) {
@@ -111,6 +117,12 @@ void GenerateDepalShader300(ShaderWriter &writer, const DepalConfig &config) {
 		if (shiftedMask & 0x7C00) writer.C("  int b = int(color.b * 31.99);\n"); else writer.C("  int b = 0;\n");
 		if (shiftedMask & 0x8000) writer.C("  int a = int(color.a);\n"); else writer.C("  int a = 0;\n");
 		writer.C("  int index = (a << 15) | (b << 10) | (g << 5) | (r);\n");
+		if (config.bufferFormat == GE_FORMAT_5551 && config.textureFormat == GE_FORMAT_CLUT8) {
+			writer.C("  int tx = int((texcoord.x * 2.0 / scaleFactor) * texSize.x);\n");
+			// I think this is backwards, but seems to work. Maybe need some small offset to nudge it right
+			// when texturing.
+			writer.C("  if ((tx & 1) == 0) { index >>= 8; } else { index &= 0xFF; }\n");
+		}
 		break;
 	case GE_FORMAT_DEPTH16:
 		// Decode depth buffer.
@@ -347,7 +359,11 @@ void GenerateDepalSmoothed(ShaderWriter &writer, const DepalConfig &config) {
 void GenerateDepalFs(ShaderWriter &writer, const DepalConfig &config) {
 	writer.DeclareSamplers(samplers);
 	writer.HighPrecisionFloat();
-	writer.BeginFSMain(config.bufferFormat == GE_FORMAT_DEPTH16 ? g_draw2Duniforms : Slice<UniformDef>::empty(), varyings);
+
+	bool needsUniforms = config.bufferFormat == GE_FORMAT_DEPTH16 ||
+		(config.bufferFormat == GE_FORMAT_5551 && config.textureFormat == GE_FORMAT_CLUT8);  // The SOCOM problem
+
+	writer.BeginFSMain(needsUniforms ? g_draw2Duniforms : Slice<UniformDef>::empty(), varyings);
 	if (config.smoothedDepal) {
 		// Handles a limited set of cases, but doesn't need any integer math so we don't
 		// need two variants.

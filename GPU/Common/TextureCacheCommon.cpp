@@ -1027,14 +1027,17 @@ bool TextureCacheCommon::MatchFramebuffer(
 		}
 
 		// Check works for D16 too.
+		// These are combinations that we have special-cased handling for. There are more
+		// ones possible, but rare.
 		const bool matchingClutFormat =
 			(fb_format == GE_FORMAT_DEPTH16 && entry.format == GE_TFMT_CLUT16) ||
 			(fb_format == GE_FORMAT_DEPTH16 && entry.format == GE_TFMT_5650) ||
 			(fb_format == GE_FORMAT_8888 && entry.format == GE_TFMT_CLUT32) ||
 			(fb_format != GE_FORMAT_8888 && entry.format == GE_TFMT_CLUT16) ||
-			(fb_format == GE_FORMAT_8888 && entry.format == GE_TFMT_CLUT8);
+			(fb_format == GE_FORMAT_8888 && entry.format == GE_TFMT_CLUT8) ||
+			(fb_format == GE_FORMAT_5551 && entry.format == GE_TFMT_CLUT8);
 
-		const int texBitsPerPixel = std::max(1U, (u32)textureBitsPerPixel[entry.format]);
+		const int texBitsPerPixel = TextureFormatBitsPerPixel(entry.format);
 		const int byteOffset = texaddr - addr;
 		if (byteOffset > 0) {
 			matchInfo->yOffset = byteOffset / fb_stride_in_bytes;
@@ -2144,6 +2147,7 @@ void TextureCacheCommon::ApplyTexture() {
 	}
 }
 
+// Can we depalettize at all? This refers to both in-fragment-shader depal and "traditional" depal through a separate pass.
 static bool CanDepalettize(GETextureFormat texFormat, GEBufferFormat bufferFormat) {
 	if (IsClutFormat(texFormat)) {
 		switch (bufferFormat) {
@@ -2152,6 +2156,10 @@ static bool CanDepalettize(GETextureFormat texFormat, GEBufferFormat bufferForma
 		case GE_FORMAT_5551:
 		case GE_FORMAT_DEPTH16:
 			if (texFormat == GE_TFMT_CLUT16) {
+				return true;
+			}
+			if (texFormat == GE_TFMT_CLUT8 && bufferFormat == GE_FORMAT_5551) {
+				// Wacky case from issue #16210 (SOCOM etc). Special depal mode (separate depalettize only).
 				return true;
 			}
 			break;
@@ -2213,7 +2221,8 @@ void TextureCacheCommon::ApplyTextureFramebuffer(VirtualFramebuffer *framebuffer
 	bool useShaderDepal = framebufferManager_->GetCurrentRenderVFB() != framebuffer &&
 		!depth && clutRenderAddress_ == 0xFFFFFFFF &&
 		!gstate_c.curTextureIs3D &&
-		draw_->GetShaderLanguageDesc().bitwiseOps;
+		draw_->GetShaderLanguageDesc().bitwiseOps
+		&& !(texFormat == GE_TFMT_CLUT8 && framebuffer->fb_format == GE_FORMAT_5551);  // This special case we don't handle in the shader.
 
 	switch (draw_->GetShaderLanguageDesc().shaderLanguage) {
 	case ShaderLanguage::HLSL_D3D9:
@@ -2292,6 +2301,8 @@ void TextureCacheCommon::ApplyTextureFramebuffer(VirtualFramebuffer *framebuffer
 	if (textureShader) {
 		bool needsDepthXSwizzle = depthUpperBits == 2;
 
+		float depalXScale = 8.0f * (float)BufferFormatBytesPerPixel(framebuffer->fb_format) / (float)TextureFormatBitsPerPixel(texFormat);
+
 		int depalWidth = framebuffer->renderWidth;
 		int texWidth = framebuffer->width;
 		if (needsDepthXSwizzle) {
@@ -2315,13 +2326,13 @@ void TextureCacheCommon::ApplyTextureFramebuffer(VirtualFramebuffer *framebuffer
 			gstate_c.Dirty(DIRTY_TEXTURE_PARAMS);
 		}
 
-		Draw::Framebuffer *depalFBO = framebufferManager_->GetTempFBO(TempFBO::DEPAL, depalWidth, framebuffer->renderHeight);
+		Draw::Framebuffer *depalFBO = framebufferManager_->GetTempFBO(TempFBO::DEPAL, depalWidth * depalXScale, framebuffer->renderHeight);
 		draw_->BindTexture(0, nullptr);
 		draw_->BindTexture(1, nullptr);
 		draw_->BindFramebufferAsRenderTarget(depalFBO, { Draw::RPAction::DONT_CARE, Draw::RPAction::DONT_CARE, Draw::RPAction::DONT_CARE }, "Depal");
 		draw_->InvalidateFramebuffer(Draw::FB_INVALIDATION_STORE, Draw::FB_DEPTH_BIT | Draw::FB_STENCIL_BIT);
-		draw_->SetScissorRect(u1, v1, u2 - u1, v2 - v1);
-		Draw::Viewport viewport{ 0.0f, 0.0f, (float)depalWidth, (float)framebuffer->renderHeight, 0.0f, 1.0f };
+		draw_->SetScissorRect(u1 * depalXScale, v1, (u2 - u1) * depalXScale, v2 - v1);
+		Draw::Viewport viewport{ 0.0f, 0.0f, (float)depalWidth * depalXScale, (float)framebuffer->renderHeight, 0.0f, 1.0f };
 		draw_->SetViewport(viewport);
 
 		draw_->BindFramebufferAsTexture(framebuffer->fbo, 0, depth ? Draw::FB_DEPTH_BIT : Draw::FB_COLOR_BIT, Draw::ALL_LAYERS);
@@ -2335,12 +2346,17 @@ void TextureCacheCommon::ApplyTextureFramebuffer(VirtualFramebuffer *framebuffer
 		draw_->BindSamplerStates(0, 1, &nearest);
 		draw_->BindSamplerStates(1, 1, &clutSampler);
 
-		draw2D_->Blit(textureShader, u1, v1, u2, v2, u1, v1, u2, v2, framebuffer->renderWidth, framebuffer->renderHeight, depalWidth, framebuffer->renderHeight, false, framebuffer->renderScaleFactor);
+		// NOTE: We need to "stretch" if depalXScale is wrong, 
+		draw2D_->Blit(textureShader, u1, v1, u2, v2, u1, v1, u2, v2,
+			framebuffer->renderWidth, framebuffer->renderHeight, depalWidth, framebuffer->renderHeight,
+			false, framebuffer->renderScaleFactor);
 
 		gpuStats.numDepal++;
 
-		gstate_c.curTextureWidth = texWidth;
-
+		gstate_c.curTextureWidth = texWidth * depalXScale;
+		gstate_c.curTextureXOffset /= depalXScale * depalXScale;  // This state gets wrecked by SetTexture which happens AFTER apply texture! Something is badly wrong. (D3D11).
+		gstate_c.Dirty(DIRTY_TEXCLAMP);
+		
 		draw_->BindTexture(0, nullptr);
 		framebufferManager_->RebindFramebuffer("ApplyTextureFramebuffer");
 
