@@ -502,7 +502,7 @@ private:
 	void FlushSync();
 	void StopThread();
 
-	void PerformPendingDescWrites(const FastVec<VulkanDescriptorWrite> &pendingWrites, int imageDescCount, int bufferDescCount);
+	void PerformPendingDescWrites(const FastVec<VulkanDescriptorWrite> &pendingWrites, int imageDescCount, int bufferDescCount, FrameData &frameData);
 
 	FrameDataShared frameDataShared_;
 
@@ -564,6 +564,7 @@ private:
 	SimpleStat initTimeMs_;
 	SimpleStat totalGPUTimeMs_;
 	SimpleStat renderCPUTimeMs_;
+	SimpleStat descWriteTimeMs_;
 
 	std::function<void(InvalidationCallbackFlags)> invalidationCallback_;
 

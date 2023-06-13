@@ -251,7 +251,8 @@ VulkanRenderManager::VulkanRenderManager(VulkanContext *vulkan)
 	: vulkan_(vulkan), queueRunner_(vulkan),
 	initTimeMs_("initTimeMs"),
 	totalGPUTimeMs_("totalGPUTimeMs"),
-	renderCPUTimeMs_("renderCPUTimeMs")
+	renderCPUTimeMs_("renderCPUTimeMs"),
+	descWriteTimeMs_("descWriteTimeMs")
 {
 	inflightFramesAtStart_ = vulkan_->GetInflightFrames();
 
@@ -583,6 +584,9 @@ void VulkanRenderManager::BeginFrame(bool enableProfiling, bool enableLogProfile
 				renderCPUTimeMs_.Update((frameData.profile.cpuEndTime - frameData.profile.cpuStartTime) * 1000.0);
 				renderCPUTimeMs_.Format(line, sizeof(line));
 				str << line;
+				descWriteTimeMs_.Update(frameData.profile.descWriteTime * 1000.0);
+				descWriteTimeMs_.Format(line, sizeof(line));
+				str << line;
 				for (int i = 0; i < numQueries - 1; i++) {
 					uint64_t diff = (queryResults[i + 1] - queryResults[i]) & timestampDiffMask;
 					double milliseconds = (double)diff * timestampConversionFactor;
@@ -607,6 +611,9 @@ void VulkanRenderManager::BeginFrame(bool enableProfiling, bool enableLogProfile
 			char line[256];
 			renderCPUTimeMs_.Update((frameData.profile.cpuEndTime - frameData.profile.cpuStartTime) * 1000.0);
 			renderCPUTimeMs_.Format(line, sizeof(line));
+			str << line;
+			descWriteTimeMs_.Update(frameData.profile.descWriteTime * 1000.0);
+			descWriteTimeMs_.Format(line, sizeof(line));
 			str << line;
 			frameData.profile.profileSummary = str.str();
 		}
@@ -1299,7 +1306,7 @@ void VulkanRenderManager::Wipe() {
 void VulkanRenderManager::Run(VKRRenderThreadTask &task) {
 	FrameData &frameData = frameData_[task.frame];
 
-	PerformPendingDescWrites(task.descWrites, task.numImageWrites, task.numBufferWrites);
+	PerformPendingDescWrites(task.descWrites, task.numImageWrites, task.numBufferWrites, frameData);
 
 	_dbg_assert_(!frameData.hasPresentCommands);
 	frameData.SubmitPending(vulkan_, FrameSubmitType::Pending, frameDataShared_);
@@ -1418,9 +1425,12 @@ void VulkanRenderManager::ResetStats() {
 	initTimeMs_.Reset();
 	totalGPUTimeMs_.Reset();
 	renderCPUTimeMs_.Reset();
+	descWriteTimeMs_.Reset();
 }
 
-void VulkanRenderManager::PerformPendingDescWrites(const FastVec<VulkanDescriptorWrite> &pendingWrites, int imageDescCount, int bufferDescCount) {
+void VulkanRenderManager::PerformPendingDescWrites(const FastVec<VulkanDescriptorWrite> &pendingWrites, int imageDescCount, int bufferDescCount, FrameData &frameData) {
+	double startTime = time_now_d();
+
 	FastVec<VkWriteDescriptorSet> writes;
 	FastVec<VkDescriptorImageInfo> imgInfo;
 	FastVec<VkDescriptorBufferInfo> bufInfo;
@@ -1475,5 +1485,8 @@ void VulkanRenderManager::PerformPendingDescWrites(const FastVec<VulkanDescripto
 
 	if (!writes.empty()) {
 		vkUpdateDescriptorSets(vulkan_->GetDevice(), (uint32_t)writes.size(), writes.data(), 0, nullptr);
+	}
+	if (frameData.profile.enabled) {
+		frameData.profile.descWriteTime = time_now_d() - startTime;
 	}
 }
