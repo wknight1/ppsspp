@@ -1257,6 +1257,8 @@ void VulkanRenderManager::Finish() {
 		}
 	}
 
+	PerformPendingDescWrites();
+
 	int curFrame = vulkan_->GetCurFrame();
 	FrameData &frameData = frameData_[curFrame];
 
@@ -1371,6 +1373,8 @@ void VulkanRenderManager::FlushSync() {
 		invalidationCallback_(InvalidationCallbackFlags::COMMAND_BUFFER_STATE);
 	}
 
+	PerformPendingDescWrites();
+
 	int curFrame = vulkan_->GetCurFrame();
 	FrameData &frameData = frameData_[curFrame];
 	
@@ -1399,4 +1403,52 @@ void VulkanRenderManager::ResetStats() {
 	initTimeMs_.Reset();
 	totalGPUTimeMs_.Reset();
 	renderCPUTimeMs_.Reset();
+}
+
+void VulkanRenderManager::PerformPendingDescWrites() {
+	FastVec<VkWriteDescriptorSet> writes;
+	FastVec<VkDescriptorImageInfo> imgInfo;
+	FastVec<VkDescriptorBufferInfo> bufInfo;
+	// Note: These CANNOT be resized while we're building the struct! As that'll reallocate the buffer.
+	// As a result they need to be oversized, unfortunately. Will do something different later.
+	writes.reserve(pendingDescWrites_.size());
+	imgInfo.reserve(pendingDescWrites_.size() * 2);
+	bufInfo.reserve(pendingDescWrites_.size() * 6);  // 3 uniform buffers, 3 storage buffers. Not realistic that we'll use it all.
+
+	for (auto &write : pendingDescWrites_) {
+		VkWriteDescriptorSet &vkWrite = writes.push_uninitialized();
+		vkWrite.pNext = nullptr;
+		vkWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		vkWrite.descriptorCount = 1;
+		vkWrite.descriptorType = write.descriptorType;
+		vkWrite.dstBinding = write.dstBinding;
+		vkWrite.dstSet = write.set;
+		vkWrite.dstArrayElement = 0;
+		switch (write.descriptorType) {
+		case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+		{
+			VkDescriptorImageInfo &info = imgInfo.push_uninitialized();
+			info.imageLayout = write.image.imageLayout;
+			info.imageView = write.image.imageView;
+			info.sampler = write.image.sampler;
+			vkWrite.pImageInfo = &info;
+			break;
+		}
+		case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+		case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+		{
+			VkDescriptorBufferInfo &info = bufInfo.push_uninitialized();
+			info.buffer = write.buffer.buffer;
+			info.offset = write.buffer.offset;
+			info.range = write.buffer.range;
+			vkWrite.pBufferInfo = &info;
+			break;
+		}
+		}
+	}
+
+	if (!writes.empty()) {
+		vkUpdateDescriptorSets(vulkan_->GetDevice(), writes.size(), writes.data(), 0, nullptr);
+		pendingDescWrites_.clear();
+	}
 }

@@ -27,6 +27,26 @@
 // Forward declaration
 VK_DEFINE_HANDLE(VmaAllocation);
 
+// Shrunken version of the structs VkWriteDescriptorSet and its associated pointed structs,
+// for transfer between the threads.
+struct VulkanDescriptorWrite {
+	VkDescriptorType descriptorType; // Valid: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+	VkDescriptorSet set;
+	int dstBinding;
+	union {
+		struct {
+			VkImageView imageView;
+			VkImageLayout imageLayout;
+			VkSampler sampler;
+		} image;
+		struct {  // shared by storage buffer and uniform buffer
+			VkBuffer buffer;
+			VkDeviceSize offset;
+			VkDeviceSize range;
+		} buffer;
+	};
+};
+
 struct BoundingRect {
 	int x1;
 	int y1;
@@ -422,6 +442,34 @@ public:
 		data.debugAnnotation.annotation = annotation;
 	}
 
+	// Descriptor set writes, deferred.
+	void WriteImageDescriptor(VkDescriptorSet set, int binding, VkImageView imageView, VkImageLayout layout, VkSampler sampler) {
+		VulkanDescriptorWrite &write = pendingDescWrites_.push_uninitialized();
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.dstBinding = binding;
+		write.image.imageView = imageView;
+		write.image.imageLayout = layout;
+		write.image.sampler = sampler;
+	}
+
+	void WriteDynamicUniformBufferDescriptor(VkDescriptorSet set, int binding, VkBuffer buffer, VkDeviceSize range) {
+		VulkanDescriptorWrite &write = pendingDescWrites_.push_uninitialized();
+		write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+		write.dstBinding = binding;
+		write.buffer.buffer = buffer;
+		write.buffer.offset = 0;
+		write.buffer.range = range;
+	}
+
+	void WriteStorageBufferDescriptor(VkDescriptorSet set, int binding, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
+		VulkanDescriptorWrite &write = pendingDescWrites_.push_uninitialized();
+		write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		write.dstBinding = binding;
+		write.buffer.buffer = buffer;
+		write.buffer.offset = offset;
+		write.buffer.range = range;
+	}
+
 	VkCommandBuffer GetInitCmd();
 
 	bool CreateBackbuffers();
@@ -467,6 +515,8 @@ private:
 	// Bad for performance but sometimes necessary for synchronous CPU readbacks (screenshots and whatnot).
 	void FlushSync();
 	void StopThread();
+
+	void PerformPendingDescWrites();
 
 	FrameDataShared frameDataShared_;
 
@@ -530,4 +580,6 @@ private:
 	SimpleStat renderCPUTimeMs_;
 
 	std::function<void(InvalidationCallbackFlags)> invalidationCallback_;
+
+	FastVec<VulkanDescriptorWrite> pendingDescWrites_;
 };
