@@ -310,6 +310,12 @@ void VulkanRenderManager::StopThread() {
 		// Tell the render thread to quit when it's done.
 		VKRRenderThreadTask *task = new VKRRenderThreadTask(VKRRunType::EXIT);
 		task->frame = vulkan_->GetCurFrame();
+		task->descWrites = std::move(pendingDescWrites_);
+		task->numBufferWrites = pendingBufferDescCount_;
+		task->numImageWrites = pendingImageDescCount_;
+		pendingBufferDescCount_ = 0;
+		pendingImageDescCount_ = 0;
+
 		std::unique_lock<std::mutex> lock(pushMutex_);
 		renderThreadQueue_.push(task);
 		pushCondVar_.notify_one();
@@ -1257,14 +1263,17 @@ void VulkanRenderManager::Finish() {
 		}
 	}
 
-	PerformPendingDescWrites();
-
 	int curFrame = vulkan_->GetCurFrame();
 	FrameData &frameData = frameData_[curFrame];
 
 	VLOG("PUSH: Frame[%d]", curFrame);
 	VKRRenderThreadTask *task = new VKRRenderThreadTask(VKRRunType::PRESENT);
 	task->frame = curFrame;
+	task->descWrites = std::move(pendingDescWrites_);
+	task->numBufferWrites = pendingBufferDescCount_;
+	task->numImageWrites = pendingImageDescCount_;
+	pendingBufferDescCount_ = 0;
+	pendingImageDescCount_ = 0;
 	{
 		std::unique_lock<std::mutex> lock(pushMutex_);
 		renderThreadQueue_.push(task);
@@ -1289,6 +1298,8 @@ void VulkanRenderManager::Wipe() {
 // Can be called again after a VKRRunType::SYNC on the same frame.
 void VulkanRenderManager::Run(VKRRenderThreadTask &task) {
 	FrameData &frameData = frameData_[task.frame];
+
+	PerformPendingDescWrites(task.descWrites, task.numImageWrites, task.numBufferWrites);
 
 	_dbg_assert_(!frameData.hasPresentCommands);
 	frameData.SubmitPending(vulkan_, FrameSubmitType::Pending, frameDataShared_);
@@ -1373,8 +1384,6 @@ void VulkanRenderManager::FlushSync() {
 		invalidationCallback_(InvalidationCallbackFlags::COMMAND_BUFFER_STATE);
 	}
 
-	PerformPendingDescWrites();
-
 	int curFrame = vulkan_->GetCurFrame();
 	FrameData &frameData = frameData_[curFrame];
 	
@@ -1382,6 +1391,12 @@ void VulkanRenderManager::FlushSync() {
 		VLOG("PUSH: Frame[%d]", curFrame);
 		VKRRenderThreadTask *task = new VKRRenderThreadTask(VKRRunType::SYNC);
 		task->frame = curFrame;
+		task->descWrites = std::move(pendingDescWrites_);
+		task->numBufferWrites = pendingBufferDescCount_;
+		task->numImageWrites = pendingImageDescCount_;
+		pendingBufferDescCount_ = 0;
+		pendingImageDescCount_ = 0;
+
 		std::unique_lock<std::mutex> lock(pushMutex_);
 		renderThreadQueue_.push(task);
 		renderThreadQueue_.back()->steps = std::move(steps_);
@@ -1405,17 +1420,21 @@ void VulkanRenderManager::ResetStats() {
 	renderCPUTimeMs_.Reset();
 }
 
-void VulkanRenderManager::PerformPendingDescWrites() {
+void VulkanRenderManager::PerformPendingDescWrites(const FastVec<VulkanDescriptorWrite> &pendingWrites, int imageDescCount, int bufferDescCount) {
 	FastVec<VkWriteDescriptorSet> writes;
 	FastVec<VkDescriptorImageInfo> imgInfo;
 	FastVec<VkDescriptorBufferInfo> bufInfo;
 	// Note: These CANNOT be resized while we're building the struct! As that'll reallocate the buffer.
-	// As a result they need to be oversized, unfortunately. Will do something different later.
-	writes.reserve(pendingDescWrites_.size());
-	imgInfo.reserve(pendingDescWrites_.size() * 2);
-	bufInfo.reserve(pendingDescWrites_.size() * 6);  // 3 uniform buffers, 3 storage buffers. Not realistic that we'll use it all.
+	// So we reserve the size before-hand, and then lock the capacities (debug-only check).
+	writes.reserve(pendingWrites.size());
+	imgInfo.reserve(imageDescCount);
+	bufInfo.reserve(bufferDescCount);
 
-	for (auto &write : pendingDescWrites_) {
+	writes.LockCapacity();
+	imgInfo.LockCapacity();
+	bufInfo.LockCapacity();
+
+	for (auto &write : pendingWrites) {
 		VkWriteDescriptorSet &vkWrite = writes.push_uninitialized();
 		vkWrite.pNext = nullptr;
 		vkWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1432,6 +1451,8 @@ void VulkanRenderManager::PerformPendingDescWrites() {
 			info.imageView = write.image.imageView;
 			info.sampler = write.image.sampler;
 			vkWrite.pImageInfo = &info;
+			vkWrite.pBufferInfo = nullptr;
+			vkWrite.pTexelBufferView = nullptr;
 			break;
 		}
 		case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
@@ -1442,13 +1463,17 @@ void VulkanRenderManager::PerformPendingDescWrites() {
 			info.offset = write.buffer.offset;
 			info.range = write.buffer.range;
 			vkWrite.pBufferInfo = &info;
+			vkWrite.pImageInfo = nullptr;
+			vkWrite.pTexelBufferView = nullptr;
 			break;
 		}
+		default:
+			_dbg_assert_(false);
+			break;
 		}
 	}
 
 	if (!writes.empty()) {
-		vkUpdateDescriptorSets(vulkan_->GetDevice(), writes.size(), writes.data(), 0, nullptr);
-		pendingDescWrites_.clear();
+		vkUpdateDescriptorSets(vulkan_->GetDevice(), (uint32_t)writes.size(), writes.data(), 0, nullptr);
 	}
 }

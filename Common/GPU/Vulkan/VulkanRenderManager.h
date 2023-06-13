@@ -27,26 +27,6 @@
 // Forward declaration
 VK_DEFINE_HANDLE(VmaAllocation);
 
-// Shrunken version of the structs VkWriteDescriptorSet and its associated pointed structs,
-// for transfer between the threads.
-struct VulkanDescriptorWrite {
-	VkDescriptorType descriptorType; // Valid: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-	VkDescriptorSet set;
-	int dstBinding;
-	union {
-		struct {
-			VkImageView imageView;
-			VkImageLayout imageLayout;
-			VkSampler sampler;
-		} image;
-		struct {  // shared by storage buffer and uniform buffer
-			VkBuffer buffer;
-			VkDeviceSize offset;
-			VkDeviceSize range;
-		} buffer;
-	};
-};
-
 struct BoundingRect {
 	int x1;
 	int y1;
@@ -447,27 +427,33 @@ public:
 		VulkanDescriptorWrite &write = pendingDescWrites_.push_uninitialized();
 		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		write.dstBinding = binding;
+		write.set = set;
 		write.image.imageView = imageView;
 		write.image.imageLayout = layout;
 		write.image.sampler = sampler;
+		pendingImageDescCount_++;
 	}
 
 	void WriteDynamicUniformBufferDescriptor(VkDescriptorSet set, int binding, VkBuffer buffer, VkDeviceSize range) {
 		VulkanDescriptorWrite &write = pendingDescWrites_.push_uninitialized();
 		write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		write.dstBinding = binding;
+		write.set = set;
 		write.buffer.buffer = buffer;
 		write.buffer.offset = 0;
 		write.buffer.range = range;
+		pendingBufferDescCount_++;
 	}
 
 	void WriteStorageBufferDescriptor(VkDescriptorSet set, int binding, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
 		VulkanDescriptorWrite &write = pendingDescWrites_.push_uninitialized();
 		write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		write.dstBinding = binding;
+		write.set = set;
 		write.buffer.buffer = buffer;
 		write.buffer.offset = offset;
 		write.buffer.range = range;
+		pendingBufferDescCount_++;
 	}
 
 	VkCommandBuffer GetInitCmd();
@@ -516,7 +502,7 @@ private:
 	void FlushSync();
 	void StopThread();
 
-	void PerformPendingDescWrites();
+	void PerformPendingDescWrites(const FastVec<VulkanDescriptorWrite> &pendingWrites, int imageDescCount, int bufferDescCount);
 
 	FrameDataShared frameDataShared_;
 
@@ -582,4 +568,6 @@ private:
 	std::function<void(InvalidationCallbackFlags)> invalidationCallback_;
 
 	FastVec<VulkanDescriptorWrite> pendingDescWrites_;
+	int pendingImageDescCount_ = 0;
+	int pendingBufferDescCount_ = 0;
 };

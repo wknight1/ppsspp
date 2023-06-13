@@ -392,119 +392,37 @@ VkDescriptorSet DrawEngineVulkan::GetOrCreateDescriptorSet(VkImageView imageView
 	// We wipe the cache on every frame.
 	VkDescriptorSet desc = frame.descPool.Allocate(1, &descriptorSetLayout_, "game_descset");
 
+	VulkanRenderManager *rm = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
+
 	// Even in release mode, this is bad.
 	_assert_msg_(desc != VK_NULL_HANDLE, "Ran out of descriptor space in pool. sz=%d", (int)frame.descSets.size());
 
-	// We just don't write to the slots we don't care about, which is fine.
-	VkWriteDescriptorSet writes[DRAW_BINDING_COUNT]{};
 	// Main texture
-	int n = 0;
-	VkDescriptorImageInfo tex[3]{};
 	if (imageView) {
 		_dbg_assert_(sampler != VK_NULL_HANDLE);
-
-		tex[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		tex[0].imageView = imageView;
-		tex[0].sampler = sampler;
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_TEXTURE;
-		writes[n].pImageInfo = &tex[0];
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[n].dstSet = desc;
-		n++;
+		rm->WriteImageDescriptor(desc, DRAW_BINDING_TEXTURE, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, sampler);
 	}
 
 	if (boundSecondary_) {
-		tex[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		tex[1].imageView = boundSecondary_;
-		tex[1].sampler = samplerSecondaryNearest_;
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_2ND_TEXTURE;
-		writes[n].pImageInfo = &tex[1];
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[n].dstSet = desc;
-		n++;
+		rm->WriteImageDescriptor(desc, DRAW_BINDING_2ND_TEXTURE, boundSecondary_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, samplerSecondaryNearest_);
 	}
 
 	if (boundDepal_) {
-		tex[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		tex[2].imageView = boundDepal_;
-		tex[2].sampler = boundDepalSmoothed_ ? samplerSecondaryLinear_ : samplerSecondaryNearest_;
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_DEPAL_TEXTURE;
-		writes[n].pImageInfo = &tex[2];
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[n].dstSet = desc;
-		n++;
+		rm->WriteImageDescriptor(desc, DRAW_BINDING_DEPAL_TEXTURE, boundDepal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, boundDepalSmoothed_ ? samplerSecondaryLinear_ : samplerSecondaryNearest_);
 	}
 
 	// Tessellation data buffer.
 	if (tess) {
 		const VkDescriptorBufferInfo *bufInfo = tessDataTransferVulkan->GetBufferInfo();
-		// Control Points
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_TESS_STORAGE_BUF;
-		writes[n].pBufferInfo = &bufInfo[0];
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writes[n].dstSet = desc;
-		n++;
-		// Weights U
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_TESS_STORAGE_BUF_WU;
-		writes[n].pBufferInfo = &bufInfo[1];
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writes[n].dstSet = desc;
-		n++;
-		// Weights V
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_TESS_STORAGE_BUF_WV;
-		writes[n].pBufferInfo = &bufInfo[2];
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writes[n].dstSet = desc;
-		n++;
+		rm->WriteStorageBufferDescriptor(desc, DRAW_BINDING_TESS_STORAGE_BUF, bufInfo[0].buffer, bufInfo[0].offset, bufInfo[0].range);
+		rm->WriteStorageBufferDescriptor(desc, DRAW_BINDING_TESS_STORAGE_BUF_WU, bufInfo[1].buffer, bufInfo[1].offset, bufInfo[1].range);
+		rm->WriteStorageBufferDescriptor(desc, DRAW_BINDING_TESS_STORAGE_BUF_WV, bufInfo[2].buffer, bufInfo[2].offset, bufInfo[2].range);
 	}
 
-	// Uniform buffer objects
-	VkDescriptorBufferInfo buf[3]{};
-	int count = 0;
-	buf[count].buffer = base;
-	buf[count].offset = 0;
-	buf[count].range = sizeof(UB_VS_FS_Base);
-	count++;
-	buf[count].buffer = light;
-	buf[count].offset = 0;
-	buf[count].range = sizeof(UB_VS_Lights);
-	count++;
-	buf[count].buffer = bone;
-	buf[count].offset = 0;
-	buf[count].range = sizeof(UB_VS_Bones);
-	count++;
-	for (int i = 0; i < count; i++) {
-		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[n].pNext = nullptr;
-		writes[n].dstBinding = DRAW_BINDING_DYNUBO_BASE + i;
-		writes[n].dstArrayElement = 0;
-		writes[n].pBufferInfo = &buf[i];
-		writes[n].dstSet = desc;
-		writes[n].descriptorCount = 1;
-		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-		n++;
-	}
-
-	VulkanContext *vulkan = (VulkanContext *)draw_->GetNativeObject(Draw::NativeObject::CONTEXT);
-	vkUpdateDescriptorSets(vulkan->GetDevice(), n, writes, 0, nullptr);
+	// TODO: Only write the used uniform buffers to the descriptor.
+	rm->WriteDynamicUniformBufferDescriptor(desc, DRAW_BINDING_DYNUBO_BASE, base, sizeof(UB_VS_FS_Base));
+	rm->WriteDynamicUniformBufferDescriptor(desc, DRAW_BINDING_DYNUBO_LIGHT, base, sizeof(UB_VS_Lights));
+	rm->WriteDynamicUniformBufferDescriptor(desc, DRAW_BINDING_DYNUBO_BONE, base, sizeof(UB_VS_Bones));
 
 	if (!tess) // Again, avoid caching when HW tessellation.
 		frame.descSets.Insert(key, desc);

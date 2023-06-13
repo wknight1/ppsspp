@@ -207,11 +207,37 @@ struct VKRStep {
 	};
 };
 
-// These are enqueued from the main thread,
-// and the render thread pops them off
+// Shrunken version of the structs VkWriteDescriptorSet and its associated pointed structs,
+// for transfer between the threads.
+struct VulkanDescriptorWrite {
+	VkDescriptorType descriptorType; // Valid: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+	VkDescriptorSet set;
+	int dstBinding;
+	union {
+		struct {
+			VkImageView imageView;
+			VkImageLayout imageLayout;
+			VkSampler sampler;
+		} image;
+		struct {  // shared by storage buffer and uniform buffer
+			VkBuffer buffer;
+			VkDeviceSize offset;
+			VkDeviceSize range;
+		} buffer;
+	};
+};
+
+// These are enqueued from the main thread, and the render thread pops them off.
+// First any pending descriptors are written, then the steps are executed.
 struct VKRRenderThreadTask {
 	VKRRenderThreadTask(VKRRunType _runType) : runType(_runType) {}
+
+	FastVec<VulkanDescriptorWrite> descWrites;
+	int numImageWrites;
+	int numBufferWrites;
+
 	std::vector<VKRStep *> steps;
+
 	int frame = -1;
 	VKRRunType runType;
 
