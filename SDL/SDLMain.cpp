@@ -516,6 +516,8 @@ bool System_GetPropertyBool(SystemProperty prop) {
 #if PPSSPP_PLATFORM(SWITCH)
 	case SYSPROP_HAS_TEXT_INPUT_DIALOG:
 		return true;
+	case SYSPROP_HAS_KEYBOARD:
+		return true;
 #endif
 	case SYSPROP_APP_GOLD:
 #ifdef GOLD
